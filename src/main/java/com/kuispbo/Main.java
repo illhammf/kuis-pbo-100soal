@@ -95,7 +95,7 @@ public class Main {
         System.out.println("==========================================");
         System.out.println("Bank soal       : 100 soal");
         System.out.println("Soal per peserta: 10 soal acak");
-        System.out.println("Waktu per soal  : 7 detik");
+        System.out.println("Waktu per soal  : 10 detik");
         System.out.println("Pilihan         : A, B, C, D");
         System.out.println("==========================================");
     }
@@ -133,14 +133,18 @@ public class Main {
         long idPercobaan = buatPercobaan(conn, nama, nim);
 
         System.out.println();
+        System.out.println("==========================================");
         System.out.println("Nama : " + nama);
         System.out.println("NIM  : " + nim);
+        System.out.println("==========================================");
         System.out.println();
         System.out.println("Aturan kuis:");
         System.out.println("- Jawab menggunakan A, B, C, atau D.");
-        System.out.println("- Waktu setiap soal adalah 7 detik.");
+        System.out.println("- Waktu setiap soal adalah 10 detik.");
         System.out.println("- Jika waktu habis, soal dilewati.");
         System.out.println("- Jawaban yang sudah dikirim tidak dapat diubah.");
+        System.out.println("- Jangan menutup terminal saat kuis berlangsung.");
+        System.out.println("- Jangan lupa berdo'a sebelum memulai kuis. :)");
         System.out.println();
         System.out.print("Tekan ENTER untuk memulai kuis...");
         console.readLine();
