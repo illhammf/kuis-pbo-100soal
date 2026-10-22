@@ -1,205 +1,462 @@
+
 package com.kuispbo;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Main {
-    private static final int QUESTION_COUNT = 10;
-    private static final int SECONDS_PER_QUESTION = 7;
-    private static final Random RANDOM = new Random();
 
-    record Question(int id, int meeting, String text, String a, String b, String c, String d, String correct) {
-        String option(String key) {
-            return switch (key) {
-                case "A" -> a; case "B" -> b; case "C" -> c; case "D" -> d; default -> "";
-            };
-        }
+    private static final int JUMLAH_SOAL = 10;
+    private static final int WAKTU_PER_SOAL = 7;
+
+    record Soal(
+            int id,
+            int pertemuan,
+            String pertanyaan,
+            String a,
+            String b,
+            String c,
+            String d,
+            String kunci
+    ) {}
+
+    record InputJawaban(String teks, long waktuInput) {}
+
+    record Jawaban(
+            Soal soal,
+            String pilihan,
+            boolean waktuHabis,
+            boolean benar
+    ) {}
+
+    private static String env(String nama, String defaultValue) {
+        String value = System.getenv(nama);
+        return value == null ? defaultValue : value;
     }
-    record TimedLine(String text, long nanoTime) {}
-    record Answer(Question question, String selected, boolean timedOut, boolean correct) {}
 
-    private static Connection connect() throws SQLException {
-        String url = env("DB_URL", "jdbc:postgresql://localhost:5432/kuis_pbo");
+    private static Connection koneksiDatabase() throws SQLException {
+        String url = env(
+                "DB_URL",
+                "jdbc:postgresql://localhost:5432/kuis_pbo"
+        );
+
         String user = env("DB_USER", "postgres");
         String password = env("DB_PASSWORD", "");
+
         return DriverManager.getConnection(url, user, password);
     }
 
-    private static String env(String key, String fallback) {
-        String value = System.getenv(key);
-        return value == null ? fallback : value;
-    }
-
     public static void main(String[] args) {
-        System.out.println("========================================");
-        System.out.println("       KUIS PBO - 100 BANK SOAL");
-        System.out.println("========================================");
-        System.out.println("10 soal acak | 7 detik per soal | Pilihan A-D");
-        System.out.println("Pastikan PostgreSQL aktif dan schema + bank soal sudah diimpor.");
+        tampilkanHeader();
 
-        try (Connection conn = connect()) {
-            BufferedReader console =
-                    new BufferedReader(new InputStreamReader(System.in));
+        try (BufferedReader console = new BufferedReader(
+                new InputStreamReader(System.in))) {
 
-            if (countQuestions(conn) < QUESTION_COUNT) {
-                System.out.println(
-                    "Bank soal belum berisi minimal 10 soal. Jalankan database/schema.sql dan database/seed_questions.sql."
-                );
-                return;
+            try (Connection conn = koneksiDatabase()) {
+                jalankanKuis(conn, console);
+            } catch (SQLException e) {
+                System.out.println();
+                System.out.println("GAGAL MENGAKSES DATABASE");
+                System.out.println("Periksa hal berikut:");
+                System.out.println("1. PostgreSQL sudah berjalan.");
+                System.out.println("2. Database kuis_pbo sudah dibuat.");
+                System.out.println("3. Tabel dan 100 soal sudah diimpor.");
+                System.out.println("4. Username dan password PostgreSQL benar.");
+                System.out.println();
+                System.out.println("Detail error: " + e.getMessage());
             }
-            System.out.print("\nNama mahasiswa: ");
-            String name = console.readLine().trim();
-            System.out.print("NIM mahasiswa : ");
-            String nim = console.readLine().trim();
-            if (name.isBlank() || nim.isBlank()) {
-                System.out.println("Nama dan NIM wajib diisi. Kuis dibatalkan.");
-                return;
-            }
-            List<Question> selected = chooseQuestions(conn);
-            long attemptId = createAttempt(conn, name, nim);
-            System.out.println("\nMahasiswa : " + name);
-            System.out.println("NIM       : " + nim);
-            System.out.println("Kuis akan dimulai. Tekan ENTER untuk mulai...");
-            console.readLine();
 
-            // Pembaca input berjalan satu kali sepanjang kuis; timestamp membantu menolak input yang terlambat.
-            BlockingQueue<TimedLine> inputQueue = new LinkedBlockingQueue<>();
-            AtomicBoolean reading = new AtomicBoolean(true);
-            Thread inputThread = new Thread(() -> {
-                BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-                try {
-                    while (reading.get()) {
-                        String line = reader.readLine();
-                        if (line == null) break;
-                        inputQueue.offer(new TimedLine(line.trim().toUpperCase(Locale.ROOT), System.nanoTime()));
-                    }
-                } catch (Exception ignored) { }
-            }, "quiz-input-reader");
-            inputThread.setDaemon(true);
-            inputThread.start();
-
-            List<Answer> answers = new ArrayList<>();
-            Instant started = Instant.now();
-            for (int i = 0; i < selected.size(); i++) {
-                Question q = selected.get(i);
-                System.out.println("\n----------------------------------------");
-                System.out.printf("SOAL %d/%d | Pertemuan %d | Waktu %d detik%n",
-                        i + 1, selected.size(), q.meeting(), SECONDS_PER_QUESTION);
-                System.out.println(q.text());
-                System.out.println("A. " + q.a());
-                System.out.println("B. " + q.b());
-                System.out.println("C. " + q.c());
-                System.out.println("D. " + q.d());
-                System.out.print("Jawaban [A/B/C/D]: ");
-                System.out.flush();
-
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(SECONDS_PER_QUESTION);
-                String chosen = null;
-                boolean timedOut = false;
-                while (System.nanoTime() < deadline && chosen == null) {
-                    long remaining = deadline - System.nanoTime();
-                    try {
-                        TimedLine line = inputQueue.poll(Math.max(1, remaining), TimeUnit.NANOSECONDS);
-                        if (line == null) break;
-                        if (line.nanoTime() > deadline) continue;
-                        if (Set.of("A","B","C","D").contains(line.text())) {
-                            chosen = line.text();
-                        } else {
-                            System.out.println("\nInput tidak valid. Gunakan A, B, C, atau D.");
-                            System.out.print("Jawaban [A/B/C/D]: ");
-                            System.out.flush();
-                        }
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-                if (chosen == null) {
-                    timedOut = true;
-                    System.out.println("\nWaktu habis! Jawaban dilewati.");
-                }
-                boolean correct = chosen != null && chosen.equals(q.correct());
-                answers.add(new Answer(q, chosen, timedOut, correct));
-                if (chosen != null) System.out.println("Jawaban diterima. Lanjut...");
-                saveAnswer(conn, attemptId, i + 1, answers.get(i));
-            }
-            reading.set(false);
-            int correct = (int) answers.stream().filter(Answer::correct).count();
-            int unanswered = (int) answers.stream().filter(a -> a.selected() == null).count();
-            int wrong = QUESTION_COUNT - correct - unanswered;
-            double score = correct * 100.0 / QUESTION_COUNT;
-            finishAttempt(conn, attemptId, correct, wrong, unanswered, score);
-            System.out.println("\n========================================");
-            System.out.println("              HASIL KUIS");
-            System.out.println("========================================");
-            System.out.println("Nama            : " + name);
-            System.out.println("NIM             : " + nim);
-            System.out.println("Benar           : " + correct);
-            System.out.println("Salah           : " + wrong);
-            System.out.println("Tidak dijawab   : " + unanswered);
-            System.out.printf(Locale.US, "Nilai           : %.2f / 100%n", score);
-            System.out.println("Durasi          : " + Duration.between(started, Instant.now()).toSeconds() + " detik");
-            System.out.println("Hasil tersimpan di PostgreSQL.");
-            System.out.println("========================================");
-        } catch (SQLException e) {
-            System.out.println("\nGagal terhubung/menulis ke PostgreSQL.");
-            System.out.println("Periksa DB_URL, DB_USER, DB_PASSWORD dan pastikan schema serta bank soal sudah dibuat.");
+        } catch (IOException e) {
+            System.out.println("Terjadi kesalahan saat membaca terminal.");
             System.out.println("Detail: " + e.getMessage());
         }
     }
 
-    private static int countQuestions(Connection c) throws SQLException {
-        try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM questions WHERE active=TRUE");
+    private static void tampilkanHeader() {
+        System.out.println("==========================================");
+        System.out.println("           KUIS PBO - JAVA");
+        System.out.println("==========================================");
+        System.out.println("Bank soal       : 100 soal");
+        System.out.println("Soal per peserta: 10 soal acak");
+        System.out.println("Waktu per soal  : 7 detik");
+        System.out.println("Pilihan         : A, B, C, D");
+        System.out.println("==========================================");
+    }
+
+    private static void jalankanKuis(
+            Connection conn,
+            BufferedReader console
+    ) throws SQLException, IOException {
+
+        if (jumlahSoal(conn) < JUMLAH_SOAL) {
+            System.out.println();
+            System.out.println("Bank soal belum memiliki minimal 10 soal aktif.");
+            System.out.println("Jalankan database/schema.sql dan");
+            System.out.println("database/seed_questions.sql terlebih dahulu.");
+            return;
+        }
+
+        System.out.println();
+        System.out.print("Nama mahasiswa: ");
+        String nama = console.readLine();
+
+        System.out.print("NIM mahasiswa : ");
+        String nim = console.readLine();
+
+        if (nama == null || nama.isBlank()
+                || nim == null || nim.isBlank()) {
+            System.out.println("Nama dan NIM wajib diisi.");
+            return;
+        }
+
+        nama = nama.trim();
+        nim = nim.trim();
+
+        List<Soal> daftarSoal = ambilSoalAcak(conn);
+        long idPercobaan = buatPercobaan(conn, nama, nim);
+
+        System.out.println();
+        System.out.println("Nama : " + nama);
+        System.out.println("NIM  : " + nim);
+        System.out.println();
+        System.out.println("Aturan kuis:");
+        System.out.println("- Jawab menggunakan A, B, C, atau D.");
+        System.out.println("- Waktu setiap soal adalah 7 detik.");
+        System.out.println("- Jika waktu habis, soal dilewati.");
+        System.out.println("- Jawaban yang sudah dikirim tidak dapat diubah.");
+        System.out.println();
+        System.out.print("Tekan ENTER untuk memulai kuis...");
+        console.readLine();
+
+        BlockingQueue<InputJawaban> antrean =
+                new LinkedBlockingQueue<>();
+
+        AtomicBoolean membacaInput = new AtomicBoolean(true);
+
+        BufferedReader pembacaJawaban = console;
+
+        Thread threadInput = new Thread(() -> {
+            try {
+                while (membacaInput.get()) {
+                    String baris = pembacaJawaban.readLine();
+
+                    if (baris == null) {
+                        break;
+                    }
+
+                    antrean.offer(new InputJawaban(
+                            baris.trim().toUpperCase(Locale.ROOT),
+                            System.nanoTime()
+                    ));
+                }
+            } catch (IOException e) {
+                // Thread input dihentikan jika terminal ditutup.
+            }
+        });
+
+        threadInput.setDaemon(true);
+        threadInput.start();
+
+        List<Jawaban> hasilJawaban = new ArrayList<>();
+        Instant waktuMulai = Instant.now();
+
+        for (int i = 0; i < daftarSoal.size(); i++) {
+            Soal soal = daftarSoal.get(i);
+
+            System.out.println();
+            System.out.println("------------------------------------------");
+            System.out.printf(
+                    "SOAL %d DARI %d | PERTEMUAN %d%n",
+                    i + 1, daftarSoal.size(), soal.pertemuan()
+            );
+            System.out.println("------------------------------------------");
+            System.out.println(soal.pertanyaan());
+            System.out.println("A. " + soal.a());
+            System.out.println("B. " + soal.b());
+            System.out.println("C. " + soal.c());
+            System.out.println("D. " + soal.d());
+            System.out.println();
+
+            System.out.print("Jawaban [A/B/C/D]: ");
+            System.out.flush();
+
+            long tenggat = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(WAKTU_PER_SOAL);
+
+            String pilihan = null;
+            boolean waktuHabis = false;
+
+            while (pilihan == null) {
+                long sisaWaktu = tenggat - System.nanoTime();
+
+                if (sisaWaktu <= 0) {
+                    waktuHabis = true;
+                    break;
+                }
+
+                try {
+                    InputJawaban input = antrean.poll(
+                            sisaWaktu,
+                            TimeUnit.NANOSECONDS
+                    );
+
+                    if (input == null) {
+                        waktuHabis = true;
+                        break;
+                    }
+
+                    if (input.waktuInput() > tenggat) {
+                        continue;
+                    }
+
+                    if (Set.of("A", "B", "C", "D")
+                            .contains(input.teks())) {
+                        pilihan = input.teks();
+                    } else {
+                        System.out.println(
+                                "Input tidak valid. Gunakan A, B, C, atau D."
+                        );
+                        System.out.print("Jawaban [A/B/C/D]: ");
+                        System.out.flush();
+                    }
+
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    waktuHabis = true;
+                    break;
+                }
+            }
+
+            boolean benar = pilihan != null
+                    && pilihan.equals(soal.kunci());
+
+            Jawaban jawaban = new Jawaban(
+                    soal, pilihan, waktuHabis, benar
+            );
+
+            hasilJawaban.add(jawaban);
+
+            if (waktuHabis && pilihan == null) {
+                System.out.println();
+                System.out.println("WAKTU HABIS! Soal dilewati.");
+            } else {
+                System.out.println("Jawaban diterima.");
+            }
+
+            simpanJawaban(conn, idPercobaan, i + 1, jawaban);
+        }
+
+        membacaInput.set(false);
+
+        int benar = (int) hasilJawaban.stream()
+                .filter(Jawaban::benar)
+                .count();
+
+        int tidakDijawab = (int) hasilJawaban.stream()
+                .filter(j -> j.pilihan() == null)
+                .count();
+
+        int salah = JUMLAH_SOAL - benar - tidakDijawab;
+        double nilai = benar * 100.0 / JUMLAH_SOAL;
+
+        selesaikanPercobaan(
+                conn, idPercobaan, benar, salah, tidakDijawab, nilai
+        );
+
+        tampilkanHasil(
+                nama, nim, benar, salah, tidakDijawab,
+                nilai, waktuMulai
+        );
+    }
+
+    private static int jumlahSoal(Connection conn)
+            throws SQLException {
+
+        String sql =
+                "SELECT COUNT(*) FROM questions WHERE active = TRUE";
+
+        try (PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
-            rs.next(); return rs.getInt(1);
+
+            rs.next();
+            return rs.getInt(1);
         }
     }
 
-    private static List<Question> chooseQuestions(Connection c) throws SQLException {
-        List<Question> all = new ArrayList<>();
-        String sql = "SELECT id, meeting_no, question_text, option_a, option_b, option_c, option_d, correct_option " +
-                     "FROM questions WHERE active=TRUE ORDER BY random() LIMIT ?";
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setInt(1, QUESTION_COUNT);
+    private static List<Soal> ambilSoalAcak(Connection conn)
+            throws SQLException {
+
+        List<Soal> daftar = new ArrayList<>();
+
+        String sql = """
+                SELECT id, meeting_no, question_text,
+                       option_a, option_b, option_c, option_d,
+                       correct_option
+                FROM questions
+                WHERE active = TRUE
+                ORDER BY random()
+                LIMIT ?
+                """;
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, JUMLAH_SOAL);
+
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) all.add(new Question(rs.getInt(1), rs.getInt(2), rs.getString(3),
-                        rs.getString(4), rs.getString(5), rs.getString(6), rs.getString(7), rs.getString(8).trim()));
+                while (rs.next()) {
+                    daftar.add(new Soal(
+                            rs.getInt("id"),
+                            rs.getInt("meeting_no"),
+                            rs.getString("question_text"),
+                            rs.getString("option_a"),
+                            rs.getString("option_b"),
+                            rs.getString("option_c"),
+                            rs.getString("option_d"),
+                            rs.getString("correct_option").trim()
+                    ));
+                }
             }
         }
-        if (all.size() != QUESTION_COUNT) throw new SQLException("Bank soal tidak cukup.");
-        return all;
+
+        if (daftar.size() != JUMLAH_SOAL) {
+            throw new SQLException(
+                    "Jumlah soal aktif tidak mencukupi."
+            );
+        }
+
+        return daftar;
     }
 
-    private static long createAttempt(Connection c, String name, String nim) throws SQLException {
-        String sql = "INSERT INTO quiz_attempts(student_name, student_nim, total_questions) VALUES (?,?,?) RETURNING id";
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, name); ps.setString(2, nim); ps.setInt(3, QUESTION_COUNT);
-            try (ResultSet rs = ps.executeQuery()) { rs.next(); return rs.getLong(1); }
+    private static long buatPercobaan(
+            Connection conn,
+            String nama,
+            String nim
+    ) throws SQLException {
+
+        String sql = """
+                INSERT INTO quiz_attempts
+                    (student_name, student_nim, total_questions)
+                VALUES (?, ?, ?)
+                RETURNING id
+                """;
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, nama);
+            ps.setString(2, nim);
+            ps.setInt(3, JUMLAH_SOAL);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong("id");
+            }
         }
     }
 
-    private static void saveAnswer(Connection c, long attemptId, int order, Answer a) throws SQLException {
-        String sql = "INSERT INTO attempt_answers(attempt_id, question_id, question_order, selected_option, is_correct, timed_out, answered_at) " +
-                     "VALUES (?,?,?,?,?,?,CASE WHEN ? THEN NULL ELSE NOW() END)";
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setLong(1, attemptId); ps.setInt(2, a.question().id()); ps.setInt(3, order);
-            if (a.selected() == null) ps.setNull(4, Types.CHAR); else ps.setString(4, a.selected());
-            ps.setBoolean(5, a.correct()); ps.setBoolean(6, a.timedOut()); ps.setBoolean(7, a.timedOut());
+    private static void simpanJawaban(
+            Connection conn,
+            long idPercobaan,
+            int urutan,
+            Jawaban jawaban
+    ) throws SQLException {
+
+        String sql = """
+                INSERT INTO attempt_answers
+                    (attempt_id, question_id, question_order,
+                     selected_option, is_correct, timed_out, answered_at)
+                VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? THEN NULL ELSE NOW() END)
+                """;
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, idPercobaan);
+            ps.setInt(2, jawaban.soal().id());
+            ps.setInt(3, urutan);
+
+            if (jawaban.pilihan() == null) {
+                ps.setNull(4, Types.CHAR);
+            } else {
+                ps.setString(4, jawaban.pilihan());
+            }
+
+            ps.setBoolean(5, jawaban.benar());
+            ps.setBoolean(6, jawaban.waktuHabis());
+            ps.setBoolean(7, jawaban.waktuHabis());
+
             ps.executeUpdate();
         }
     }
 
-    private static void finishAttempt(Connection c, long id, int correct, int wrong, int unanswered, double score) throws SQLException {
-        String sql = "UPDATE quiz_attempts SET finished_at=NOW(), correct_count=?, wrong_count=?, unanswered_count=?, score=? WHERE id=?";
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setInt(1, correct); ps.setInt(2, wrong); ps.setInt(3, unanswered); ps.setDouble(4, score); ps.setLong(5, id);
+    private static void selesaikanPercobaan(
+            Connection conn,
+            long idPercobaan,
+            int benar,
+            int salah,
+            int kosong,
+            double nilai
+    ) throws SQLException {
+
+        String sql = """
+                UPDATE quiz_attempts
+                SET finished_at = NOW(),
+                    correct_count = ?,
+                    wrong_count = ?,
+                    unanswered_count = ?,
+                    score = ?
+                WHERE id = ?
+                """;
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, benar);
+            ps.setInt(2, salah);
+            ps.setInt(3, kosong);
+            ps.setDouble(4, nilai);
+            ps.setLong(5, idPercobaan);
             ps.executeUpdate();
         }
+    }
+
+    private static void tampilkanHasil(
+            String nama,
+            String nim,
+            int benar,
+            int salah,
+            int kosong,
+            double nilai,
+            Instant waktuMulai
+    ) {
+        System.out.println();
+        System.out.println("==========================================");
+        System.out.println("                HASIL KUIS");
+        System.out.println("==========================================");
+        System.out.println("Nama          : " + nama);
+        System.out.println("NIM           : " + nim);
+        System.out.println("Jawaban benar : " + benar);
+        System.out.println("Jawaban salah : " + salah);
+        System.out.println("Tidak dijawab : " + kosong);
+        System.out.printf(
+                Locale.US, "Nilai         : %.2f / 100%n", nilai
+        );
+        System.out.println(
+                "Durasi        : "
+                + Duration.between(waktuMulai, Instant.now()).toSeconds()
+                + " detik"
+        );
+        System.out.println("Hasil tersimpan di PostgreSQL.");
+        System.out.println("==========================================");
     }
 }
