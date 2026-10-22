@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class Main {
 
     private static final int JUMLAH_SOAL = 10;
-    private static final int WAKTU_PER_SOAL = 7;
+    private static final int WAKTU_PER_SOAL = 10;
 
     record Soal(
             int id,
