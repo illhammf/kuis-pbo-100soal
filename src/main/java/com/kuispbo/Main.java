@@ -42,9 +42,15 @@ public class Main {
         System.out.println("========================================");
         System.out.println("10 soal acak | 7 detik per soal | Pilihan A-D");
         System.out.println("Pastikan PostgreSQL aktif dan schema + bank soal sudah diimpor.");
-        try (Connection conn = connect()) {\n            BufferedReader console = new BufferedReader(new InputStreamReader(System.in));
+
+        try (Connection conn = connect()) {
+            BufferedReader console =
+                    new BufferedReader(new InputStreamReader(System.in));
+
             if (countQuestions(conn) < QUESTION_COUNT) {
-                System.out.println("Bank soal belum berisi minimal 10 soal. Jalankan database/schema.sql dan database/seed_questions.sql.");
+                System.out.println(
+                    "Bank soal belum berisi minimal 10 soal. Jalankan database/schema.sql dan database/seed_questions.sql."
+                );
                 return;
             }
             System.out.print("\nNama mahasiswa: ");
